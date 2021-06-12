@@ -3,6 +3,13 @@ package workerpool
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
+)
+
+const (
+	STATUS_INIT = iota
+	STATUS_RUNNING
+	STATUS_STOP
 )
 
 // 任务需要实现此接口
@@ -18,7 +25,7 @@ type worker struct {
 func (wp *workerpool) newWorker() worker {
 	return worker{
 		jobChan: make(chan IJob), // 可以设置有缓冲
-		quit:    wp.quit,         //类似context cancel的思想使用channel close来通知goroutine退出
+		quit:    wp.quit,
 	}
 }
 
@@ -42,9 +49,9 @@ type workerpool struct {
 	workerLen   int
 	jobChan     chan IJob
 	workerQueue chan chan IJob
+	isClosed    int64
 	quit        chan struct{}
-	// once        sync.Once
-	rwmutex sync.RWMutex
+	rwmutex     sync.RWMutex
 }
 
 func NewWorkerPool(workerLen int) *workerpool {
@@ -52,12 +59,18 @@ func NewWorkerPool(workerLen int) *workerpool {
 		workerLen:   workerLen,
 		jobChan:     make(chan IJob),
 		workerQueue: make(chan chan IJob, workerLen),
+		isClosed:    STATUS_INIT,
 		quit:        make(chan struct{}),
-		// rwmutex: sync.RWMutex{},
 	}
 }
 
 func (wp *workerpool) Start() {
+	wp.rwmutex.Lock()
+	defer wp.rwmutex.Unlock()
+	if atomic.LoadInt64(&wp.isClosed) != STATUS_RUNNING {
+		atomic.StoreInt64(&wp.isClosed, STATUS_RUNNING)
+	}
+
 	for i := 0; i < wp.workerLen; i++ {
 		worker := wp.newWorker()
 		worker.run(wp.workerQueue)
@@ -65,13 +78,12 @@ func (wp *workerpool) Start() {
 
 	go func() {
 		for {
-			select {
-			case job := <-wp.jobChan: // 读取新写入的任务
-				workerJobQueue := <-wp.workerQueue // 读取空闲的worker的jobQueue
-				workerJobQueue <- job
-			case <-wp.quit:
+			if atomic.LoadInt64(&wp.isClosed) == STATUS_STOP {
 				return
 			}
+			job := <-wp.jobChan                // 读取新写入的任务
+			workerJobQueue := <-wp.workerQueue // 读取空闲的worker的jobQueue
+			workerJobQueue <- job
 		}
 
 	}()
@@ -79,17 +91,12 @@ func (wp *workerpool) Start() {
 
 // 将任务交给workerpool
 func (wp *workerpool) Add(job IJob) error {
-	// _, ok := <-wp.quit
-	// if !ok {
-	// 	return fmt.Errorf("workerpool has been closed")
-	// }
+	wp.rwmutex.RLock()
+	defer wp.rwmutex.RUnlock()
 
-	// wp.rwmutex.RLock()
-	// defer wp.rwmutex.RUnlock()
-
-	// if _, ok := <-wp.quit; !ok {
-	// 	return fmt.Errorf("workerpool has been closed")
-	// }
+	if atomic.LoadInt64(&wp.isClosed) != STATUS_RUNNING {
+		return fmt.Errorf("workerpool is not running")
+	}
 
 	wp.jobChan <- job
 
@@ -98,15 +105,10 @@ func (wp *workerpool) Add(job IJob) error {
 
 // 关闭workerpool
 func (wp *workerpool) Stop() {
-	// wp.once.Do(func() { // 单例防止重复关闭channel导致panic
-	// 	close(wp.quit)
-	// })
-	// wp.once.Do(func() { // 单例防止重复关闭channel导致panic
-	// 	close(wp.jobChan)
-	// })
-	// wp.rwmutex.Lock()
-	// defer wp.rwmutex.Unlock()
-	if _, ok := <-wp.quit; ok {
+	wp.rwmutex.Lock()
+	defer wp.rwmutex.Unlock()
+	if atomic.LoadInt64(&wp.isClosed) != STATUS_STOP {
+		atomic.StoreInt64(&wp.isClosed, STATUS_STOP)
 		close(wp.quit)
 	}
 }

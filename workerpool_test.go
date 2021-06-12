@@ -35,13 +35,13 @@ func TestWorkPool(t *testing.T) {
 	for i := 0; i < jobNum; i++ {
 		err := wp.Add(&something{num: i})
 		if err != nil {
-			fmt.Println("error: ", err)
-			return
+			fmt.Println("error: ", err, i)
+			// return
 		}
 
-		// if i > 50 {
-		// 	wp.Stop()
-		// }
+		if i > 50 {
+			wp.Stop()
+		}
 	}
 
 }
